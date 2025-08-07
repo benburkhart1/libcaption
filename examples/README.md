@@ -16,6 +16,7 @@ All tools accept flv as either a file path, or via stdio. use `-` to specify std
 - `flv+scc` - same as flv+srt, but accepts an scc as input. However pin on/rool up is available as it is already encoded in the scc.
 - `scc2srt` - converts an scc file to a srt file
 - `ts2srt` - same as flv2srt, but reads from a mpeg2 transport stream
+- `ts+srt` - same as flv+srt, but operates on mpeg2 transport streams to inject CEA-608/708 captions
 
 - add_captions - A shell script that utilizes ffmpeg to remux files to/from flv to simplify captioning
 non flv file. This tool is not installed by `make install`, and serves primarily as an example.
@@ -26,9 +27,15 @@ Copy it and modify it to fit your needs.
 
 `flv+srt in.flv in.srt out.flv`
 
+- Adding captions to a transport stream file:
+
+`ts+srt in.ts in.srt out.ts`
+
 - Alternatively,
 
 `flv+srt in.flv in.srt - >out.flv`
+
+`ts+srt in.ts in.srt - >out.ts`
 
 - To caption a non-flv file
 
