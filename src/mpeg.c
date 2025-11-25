@@ -398,7 +398,7 @@ libcaption_stauts_t sei_to_caption_frame(sei_t* sei, caption_frame_t* frame)
     return status;
 }
 ////////////////////////////////////////////////////////////////////////////////
-#define DEFAULT_CHANNEL 0
+#define DEFAULT_CHANNEL 1
 
 void sei_append_708(sei_t* sei, cea708_t* cea708)
 {
