@@ -69,7 +69,6 @@ int main(int argc, char** argv)
                     break;
 
                 case LIBCAPTION_READY: {
-                    // caption_frame_dump(&frame);
                     srt_cue_from_caption_frame(&frame, srt);
                 } break;
                 } //switch
@@ -79,9 +78,13 @@ int main(int argc, char** argv)
 
     // Flush anything left
     while (mpeg_bitstream_flush(&mpegbs, &frame)) {
-        if (mpeg_bitstream_status(&mpegbs)) {
+        if (mpeg_bitstream_status(&mpegbs) == LIBCAPTION_READY) {
             srt_cue_from_caption_frame(&frame, srt);
         }
+    }
+    // Handle the last flushed frame (flush returned 0 but status may be READY)
+    if (mpeg_bitstream_status(&mpegbs) == LIBCAPTION_READY) {
+        srt_cue_from_caption_frame(&frame, srt);
     }
 
     srt_dump(srt);

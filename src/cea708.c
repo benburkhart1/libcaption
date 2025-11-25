@@ -66,9 +66,9 @@ void cea708_parse_user_data_type_strcture(const uint8_t* data, size_t size, user
     data += 2, size -= 2;
 
     for (int i = 0; 3 < size && i < (int)user_data->cc_count; ++i, data += 3, size -= 3) {
-        user_data->cc_data[i].marker_bits = data[0] >> 3;
-        user_data->cc_data[i].cc_valid = data[0] >> 2;
-        user_data->cc_data[i].cc_type = data[0] >> 0;
+        user_data->cc_data[i].marker_bits = (data[0] >> 3) & 0x1F;
+        user_data->cc_data[i].cc_valid = (data[0] >> 2) & 0x01;
+        user_data->cc_data[i].cc_type = data[0] & 0x03;
         user_data->cc_data[i].cc_data = data[1] << 8 | data[2];
     }
 }

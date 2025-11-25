@@ -168,14 +168,7 @@ int main(int argc, char** argv) {
     int in_video_frame = 0;
     uint8_t frame_cc_start = 0;
     double frame_timestamp = 0.0;
-    int frame_number = 0;  // Track which frame we're on
-    
-    // Caption splitting state
-    caption_frame_t current_caption_frame;
-    caption_frame_init(&current_caption_frame);
-    int caption_frames_remaining = 0;
-    int current_caption_chunk = 0;
-    
+
     while (fread(pkt, 188, 1, input) == 1) {
         int16_t pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
         int is_pusi = (pkt[1] & 0x40) ? 1 : 0;
@@ -194,214 +187,80 @@ int main(int argc, char** argv) {
             if (is_pusi) {
                 // Process previous frame if complete
                 if (in_video_frame && frame_packets.size > 0) {
-                    frame_number++;
-                    // Determine if we should inject caption
+                    // Check if we should inject a caption
                     int should_inject = 0;
-                    
-                    // Check if we need to start a new caption
-                    if (current_cue && offset > 0.0 && caption_frames_remaining == 0) {
+                    if (current_cue && offset > 0.0) {
                         double caption_time = current_cue->timestamp + offset;
                         if (caption_time <= frame_timestamp) {
-                            // Initialize caption for splitting
-                            caption_frame_from_text(&current_caption_frame, srt_cue_data(current_cue));
-                            caption_frames_remaining = 2; // Split across 2 frames like working file
-                            current_caption_chunk = 0;
-                            fprintf(stderr, "Starting caption split across %d frames: %s\n", 
-                                    caption_frames_remaining, srt_cue_data(current_cue));
+                            should_inject = 1;
                         }
                     }
-                    
-                    // Check if we should inject part of current caption
-                    if (caption_frames_remaining > 0 && frame_number <= 2) {
-                        should_inject = 1;
-                    }
-                    
+
                     if (should_inject && frame_es.size > 0) {
-                        // Create partial caption SEI based on chunk
-                        caption_frame_t chunk_frame;
-                        caption_frame_init(&chunk_frame);
-                        
-                        // Split text like working file pattern
-                        const char* full_text = srt_cue_data(current_cue);
-                        char partial_text[256];
-                        
-                        // Split text like output_new pattern (9 CC pairs + 6 CC pairs)
-                        if (current_caption_chunk == 0) {
-                            // First chunk: take first half of text (like output_new frame 0)
-                            size_t text_len = strlen(full_text);
-                            size_t first_half = text_len / 2;
-                            strncpy(partial_text, full_text, first_half);
-                            partial_text[first_half] = '\0';
-                            fprintf(stderr, "DEBUG: Creating SEI chunk 0 (first half) with PTS %.3f: '%s'\n", 
-                                    frame_timestamp, partial_text);
-                        } else {
-                            // Second chunk: take second half of text (like output_new frame 1)
-                            size_t text_len = strlen(full_text);
-                            size_t first_half = text_len / 2;
-                            strcpy(partial_text, full_text + first_half);
-                            fprintf(stderr, "DEBUG: Creating SEI chunk 1 (second half) with PTS %.3f: '%s'\n", 
-                                    frame_timestamp, partial_text);
-                        }
-                        
-                        caption_frame_from_text(&chunk_frame, partial_text);
-                        
+                        // Create caption SEI from full text
+                        // Library handles cc_count splitting internally per CEA-708 spec
+                        caption_frame_t caption_frame;
+                        caption_frame_from_text(&caption_frame, srt_cue_data(current_cue));
+                        caption_frame.timestamp = frame_timestamp;
+
                         sei_t sei;
-                        // Use the same timestamp for all chunks so they're treated as one caption
-                        static double caption_start_timestamp = 0.0;
-                        if (current_caption_chunk == 0) {
-                            caption_start_timestamp = frame_timestamp;
-                        }
-                        sei_init(&sei, caption_start_timestamp);
-                        sei_from_caption_frame(&sei, &chunk_frame);
-                        current_caption_chunk++;
-                        caption_frames_remaining--;
+                        sei_from_caption_frame(&sei, &caption_frame);
                         
                         size_t sei_alloc_size = sei_render_size(&sei);
                         uint8_t* sei_data = malloc(sei_alloc_size);
                         size_t sei_size = sei_render(&sei, sei_data);
-                        fprintf(stderr, "DEBUG: SEI allocated %zu, actual %zu bytes\n", 
-                                sei_alloc_size, sei_size);
-                        fprintf(stderr, "DEBUG: Last 5 bytes of SEI: %02x %02x %02x %02x %02x\n",
-                                sei_data[sei_size-5], sei_data[sei_size-4], 
-                                sei_data[sei_size-3], sei_data[sei_size-2], 
-                                sei_data[sei_size-1]);
-                        
-                        // Create SEI NALU with 3-byte start code (like working files)
+
+                        // Create SEI NALU with 3-byte start code
                         buffer_t sei_nalu;
                         buffer_init(&sei_nalu);
                         uint8_t sei_header[] = {0x00, 0x00, 0x01};
                         buffer_append(&sei_nalu, sei_header, 3);
-                        buffer_append(&sei_nalu, sei_data, sei_size);  // Use actual size, not allocated
-                        // sei_render already includes the stop bit
-                        
+                        buffer_append(&sei_nalu, sei_data, sei_size);
+
                         // Find slice in ES and inject SEI before it
-                        // Look for both 3-byte and 4-byte start codes
                         size_t injection_point = 0;
-                        int found_slice = 0;
                         for (size_t i = 0; i <= frame_es.size - 4; i++) {
                             uint8_t nalu_type = 0;
-                            size_t nalu_start = 0;
-                            
+
                             // Check for 4-byte start code
                             if (i <= frame_es.size - 5 &&
                                 frame_es.data[i] == 0x00 && frame_es.data[i+1] == 0x00 &&
                                 frame_es.data[i+2] == 0x00 && frame_es.data[i+3] == 0x01) {
                                 nalu_type = frame_es.data[i+4] & 0x1F;
-                                nalu_start = i;
                             }
                             // Check for 3-byte start code
                             else if (frame_es.data[i] == 0x00 && frame_es.data[i+1] == 0x00 &&
                                      frame_es.data[i+2] == 0x01) {
                                 nalu_type = frame_es.data[i+3] & 0x1F;
-                                nalu_start = i;
                             }
-                            
+
                             if (nalu_type >= 1 && nalu_type <= 5) {
-                                injection_point = nalu_start;
-                                found_slice = 1;
-                                int start_code_len = (frame_es.data[i+2] == 0x00) ? 4 : 3;
-                                fprintf(stderr, "DEBUG: Found slice (type %d) with %d-byte start code at offset %zu in ES\n", 
-                                        nalu_type, start_code_len, nalu_start);
-                                fprintf(stderr, "DEBUG: Next 16 bytes: ");
-                                for (int j = 0; j < 16 && nalu_start+j < frame_es.size; j++) {
-                                    fprintf(stderr, "%02x ", frame_es.data[nalu_start+j]);
-                                }
-                                fprintf(stderr, "\n");
+                                injection_point = i;
                                 break;
                             }
                         }
-                        
-                        if (!found_slice) {
-                            fprintf(stderr, "WARNING: No slice found in ES data!\n");
-                        }
-                        
-                        // Create modified ES
+
+                        // Create modified ES with SEI injected before slice
                         buffer_t modified_es;
                         buffer_init(&modified_es);
                         buffer_append(&modified_es, frame_es.data, injection_point);
                         buffer_append(&modified_es, sei_nalu.data, sei_nalu.size);
-                        size_t remaining = frame_es.size - injection_point;
-                        fprintf(stderr, "DEBUG: Appending %zu bytes from injection point %zu\n", 
-                                remaining, injection_point);
-                        fprintf(stderr, "DEBUG: First 16 bytes being appended: ");
-                        for (int j = 0; j < 16 && j < remaining; j++) {
-                            fprintf(stderr, "%02x ", frame_es.data[injection_point + j]);
-                        }
-                        fprintf(stderr, "\n");
-                        
-                        buffer_append(&modified_es, frame_es.data + injection_point, remaining);
-                        
-                        fprintf(stderr, "DEBUG: Modified ES around injection (SEI then slice):\n");
-                        size_t start = injection_point;
-                        size_t end = injection_point + sei_nalu.size + 32;
-                        if (end > modified_es.size) end = modified_es.size;
-                        
-                        for (size_t j = start; j < end; j++) {
-                            if ((j - start) % 16 == 0) fprintf(stderr, "\n  %04zx: ", j);
-                            fprintf(stderr, "%02x ", modified_es.data[j]);
-                        }
-                        fprintf(stderr, "\n");
-                        
+                        buffer_append(&modified_es, frame_es.data + injection_point, frame_es.size - injection_point);
+
                         // Write modified frame as TS packets
-                        fprintf(stderr, "DEBUG: Original ES size: %zu, Modified ES size: %zu\n",
-                                frame_es.size, modified_es.size);
-                        fprintf(stderr, "DEBUG: Original packets: %zu, Need packets: %zu\n",
-                                frame_packets.size / 188, 
-                                (pes_header_size + modified_es.size + 183) / 184);
-                        
-                        // Verify modified ES has both SEI and slice
-                        fprintf(stderr, "DEBUG: Verifying modified ES contents:\n");
-                        int found_sei = 0, found_slice_after = 0;
-                        for (size_t i = 0; i <= modified_es.size - 4; i++) {
-                            uint8_t nalu_type = 0;
-                            size_t nalu_pos = 0;
-                            
-                            // Check for 4-byte start code
-                            if (i <= modified_es.size - 5 &&
-                                modified_es.data[i] == 0x00 && modified_es.data[i+1] == 0x00 &&
-                                modified_es.data[i+2] == 0x00 && modified_es.data[i+3] == 0x01) {
-                                nalu_type = modified_es.data[i+4] & 0x1F;
-                                nalu_pos = i;
-                            }
-                            // Check for 3-byte start code
-                            else if (modified_es.data[i] == 0x00 && modified_es.data[i+1] == 0x00 &&
-                                     modified_es.data[i+2] == 0x01) {
-                                nalu_type = modified_es.data[i+3] & 0x1F;
-                                nalu_pos = i;
-                            }
-                            
-                            if (nalu_type == 6) {
-                                fprintf(stderr, "  SEI at position %zu\n", nalu_pos);
-                                found_sei = 1;
-                            } else if (nalu_type >= 1 && nalu_type <= 5 && found_sei) {
-                                fprintf(stderr, "  Slice (type %d) at position %zu (after SEI)\n", nalu_type, nalu_pos);
-                                found_slice_after = 1;
-                                break;
-                            }
-                        }
-                        if (!found_slice_after) {
-                            fprintf(stderr, "ERROR: Slice not found after SEI in modified ES!\n");
-                        }
-                        
-                        int packets_written = write_es_as_ts_packets(output, modified_es.data, modified_es.size,
-                                             video_pid, frame_cc_start, 1, 
+                        write_es_as_ts_packets(output, modified_es.data, modified_es.size,
+                                             video_pid, frame_cc_start, 1,
                                              pes_header, pes_header_size);
-                        fprintf(stderr, "DEBUG: Actually wrote %d packets\n", packets_written);
                         
                         buffer_free(&modified_es);
                         buffer_free(&sei_nalu);
                         free(sei_data);
                         sei_free(&sei);
                         
-                        fprintf(stderr, "Injected caption chunk %d at %.3f\n", 
-                                current_caption_chunk - 1, frame_timestamp);
-                        
-                        // Move to next cue only when all chunks are done
-                        if (caption_frames_remaining == 0) {
-                            fprintf(stderr, "Completed caption: %s\n", srt_cue_data(current_cue));
-                            captions_injected++;
-                            current_cue = current_cue->next;
-                        }
+                        fprintf(stderr, "Injected caption at %.3f: %s\n",
+                                frame_timestamp, srt_cue_data(current_cue));
+                        captions_injected++;
+                        current_cue = current_cue->next;
                     } else {
                         // Write original frame packets
                         fwrite(frame_packets.data, frame_packets.size, 1, output);
